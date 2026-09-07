@@ -2,6 +2,7 @@ import { getD1 } from "../../../db";
 import { getCurrentUser, getMembership, routeError } from "../../lib/auth";
 import { listMeals } from "../../lib/meals";
 import type { AppState, User } from "../../lib/types";
+import { inviteUrl } from "../../lib/invites";
 
 export async function GET(request: Request) {
   try {
@@ -14,7 +15,7 @@ export async function GET(request: Request) {
     const meals = await listMeals(membership.id, user.id);
     return Response.json({
       user,
-      group: { id: membership.id, name: membership.name, role: membership.role, inviteCode: membership.role === "owner" ? membership.inviteCode : null },
+      group: { id: membership.id, name: membership.name, role: membership.role, inviteCode: membership.role === "owner" ? membership.inviteCode : null, inviteUrl: membership.role === "owner" && membership.inviteCode ? inviteUrl(request, membership.inviteCode) : null },
       members,
       meals,
     } satisfies AppState);

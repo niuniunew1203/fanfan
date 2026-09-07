@@ -74,7 +74,10 @@ export function validateNutrition(input: unknown): NutritionResult {
   const numberKeys = ["caloriesKcal", "proteinG", "carbsG", "fatG", "fiberG", "sodiumMg"] as const;
   for (const key of numberKeys) if (!Number.isFinite(value.totals[key]) || value.totals[key] < 0) throw new Error(`AI 返回的 ${key} 无效`);
   for (const item of value.items) {
-    if (!item.name || !Number.isFinite(item.estimatedGrams) || !["high", "medium", "low"].includes(item.confidence)) throw new Error("AI 食物明细格式不完整");
+    if (!item.name || item.name.length > 80 || !Number.isFinite(item.estimatedGrams) || item.estimatedGrams <= 0 || item.estimatedGrams > 5000 || !["high", "medium", "low"].includes(item.confidence)) throw new Error("AI 食物明细格式不完整");
+    for (const key of ["caloriesKcal", "proteinG", "carbsG", "fatG"] as const) {
+      if (!Number.isFinite(item[key]) || item[key] < 0) throw new Error("AI 食物营养值无效");
+    }
   }
   return value;
 }

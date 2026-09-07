@@ -7,6 +7,7 @@ export const users = sqliteTable("users", {
   authSubject: text("auth_subject").notNull(),
   displayName: text("display_name").notNull(),
   avatarUrl: text("avatar_url").notNull(),
+  avatarKey: text("avatar_key"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [uniqueIndex("users_auth_identity_idx").on(table.authProvider, table.authSubject)]);
 
@@ -15,6 +16,37 @@ export const sessions = sqliteTable("sessions", {
   userId: text("user_id").notNull().references(() => users.id),
   expiresAt: text("expires_at").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const userIdentities = sqliteTable("user_identities", {
+  provider: text("provider").notNull(),
+  subject: text("subject").notNull(),
+  userId: text("user_id").notNull().references(() => users.id),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [uniqueIndex("user_identity_unique_idx").on(table.provider, table.subject)]);
+
+export const guestCredentials = sqliteTable("guest_credentials", {
+  userId: text("user_id").primaryKey().references(() => users.id),
+  pinSalt: text("pin_salt").notNull(),
+  pinHash: text("pin_hash").notNull(),
+  iterations: integer("iterations").notNull().default(210000),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const oauthStates = sqliteTable("oauth_states", {
+  stateHash: text("state_hash").primaryKey(),
+  returnTo: text("return_to").notNull().default("/"),
+  bindUserId: text("bind_user_id"),
+  expiresAt: text("expires_at").notNull(),
+  usedAt: text("used_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const authAttempts = sqliteTable("auth_attempts", {
+  attemptKey: text("attempt_key").primaryKey(),
+  failures: integer("failures").notNull().default(0),
+  windowStartedAt: text("window_started_at").notNull(),
+  lockedUntil: text("locked_until"),
 });
 
 export const groups = sqliteTable("groups", {

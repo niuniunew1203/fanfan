@@ -55,7 +55,8 @@ function responseText(payload: Record<string, unknown>) {
 }
 
 async function callOpenAI(image: R2ObjectBody, note: string, corrections: NutritionItem[] | undefined) {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const bindings = getBindings();
+  const apiKey = bindings.OPENAI_API_KEY;
   if (!apiKey) {
     const result = demoNutrition(`${note} ${corrections?.map((item) => item.name).join(" ") ?? ""}`);
     if (corrections?.length) {
@@ -72,7 +73,7 @@ async function callOpenAI(image: R2ObjectBody, note: string, corrections: Nutrit
     }
     return { result, source: "demo" as const, model: "demo-nutrition-v1" };
   }
-  const model = process.env.OPENAI_MODEL || "gpt-5.6-terra";
+  const model = bindings.OPENAI_MODEL || "gpt-5.6-terra";
   const contentType = image.httpMetadata?.contentType || "image/jpeg";
   const prompt = `你是谨慎的饮食营养估算助手。识别照片中的每种食物并估算可食用重量和营养。只基于可见内容，不要把不确定内容说成事实。营养值均为整顿饭的估算值。用户备注：${note || "无"}。${corrections?.length ? `用户已修正的食物与份量：${JSON.stringify(corrections.map(({ name, estimatedGrams }) => ({ name, estimatedGrams })))}` : ""} comment 使用简洁中文；caveat 必须说明图片估算误差。`;
   const response = await fetch("https://api.openai.com/v1/responses", {
@@ -100,13 +101,15 @@ export async function POST(request: Request, context: Context) {
     const user = await requireUser(request);
     const membership = await requireMembership(user.id);
     mealId = (await context.params).id;
-    const meal = await getD1().prepare(`SELECT * FROM meals WHERE id = ? AND group_id = ?`).bind(mealId, membership.id).first<Record<string, string>>();
+    const meal = await getD1().prepare(`SELECT *, CASE WHEN analysis_status = 'analyzing' AND updated_at > datetime('now', '-2 minutes') THEN 1 ELSE 0 END analysis_locked FROM meals WHERE id = ? AND group_id = ?`).bind(mealId, membership.id).first<Record<string, string>>();
     if (!meal) return Response.json({ error: "餐食记录不存在" }, { status: 404 });
     if (meal.author_id !== user.id) return Response.json({ error: "只能分析自己的餐食记录" }, { status: 403 });
     if (meal.image_key.startsWith("/sample-")) return Response.json({ error: "示例餐食无需重新分析" }, { status: 400 });
+    if (Number(meal.analysis_locked)) return Response.json({ error: "这顿饭正在分析，请稍后查看" }, { status: 409 });
 
     const body = request.headers.get("content-type")?.includes("application/json") ? await request.json() as { corrections?: NutritionItem[] } : {};
-    await getD1().prepare(`UPDATE meals SET analysis_status = 'analyzing', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(mealId).run();
+    const locked = await getD1().prepare(`UPDATE meals SET analysis_status = 'analyzing', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (analysis_status != 'analyzing' OR updated_at <= datetime('now', '-2 minutes'))`).bind(mealId).run();
+    if (!locked.meta.changes) return Response.json({ error: "这顿饭正在分析，请稍后查看" }, { status: 409 });
     const object = await getBindings().MEAL_IMAGES.get(meal.image_key);
     if (!object) throw new Error("餐食照片不存在");
     const analyzed = await callOpenAI(object, meal.note, body.corrections);

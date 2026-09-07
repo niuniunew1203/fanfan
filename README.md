@@ -19,6 +19,12 @@ npm run dev
 
 - `OPENAI_API_KEY`：服务端调用 Responses API；不配置时使用明确标记的演示营养结果。
 - `OPENAI_MODEL`：默认 `gpt-5.6-terra`。
+- `DEMO_AUTH_ENABLED`：仅在明确设为 `true` 时显示三个演示身份；生产环境保持 `false`。
+- `WECHAT_APP_ID`、`WECHAT_APP_SECRET`、`WECHAT_OAUTH_ORIGIN`：同时配置后开放微信 OAuth；回调地址为 `<WECHAT_OAUTH_ORIGIN>/api/auth/wechat/callback`。
+
+## V2 家庭账号
+
+公开站点仍由应用内会话保护。家人可使用高熵邀请码、昵称、头像和 6 位数字口令创建或加入家庭，口令以随机盐 PBKDF2 哈希保存。微信身份与内部用户通过 `user_identities` 解耦，后续绑定不会迁移或复制餐食数据。
 
 密钥不得进入浏览器代码或提交到版本库。
 

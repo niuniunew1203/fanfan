@@ -3,6 +3,12 @@ import { env } from "cloudflare:workers";
 export type AppEnv = {
   DB: D1Database;
   MEAL_IMAGES: R2Bucket;
+  OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
+  WECHAT_APP_ID?: string;
+  WECHAT_APP_SECRET?: string;
+  WECHAT_OAUTH_ORIGIN?: string;
+  DEMO_AUTH_ENABLED?: string;
 };
 
 export function getBindings() {
@@ -25,8 +31,12 @@ export async function ensureDatabase() {
 async function initializeDatabase() {
   const db = getD1();
   const statements = [
-    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, auth_provider TEXT NOT NULL, auth_subject TEXT NOT NULL, display_name TEXT NOT NULL, avatar_url TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(auth_provider, auth_subject))`,
+    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, auth_provider TEXT NOT NULL, auth_subject TEXT NOT NULL, display_name TEXT NOT NULL, avatar_url TEXT NOT NULL, avatar_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(auth_provider, auth_subject))`,
     `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES users(id))`,
+    `CREATE TABLE IF NOT EXISTS user_identities (provider TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(provider, subject), FOREIGN KEY(user_id) REFERENCES users(id))`,
+    `CREATE TABLE IF NOT EXISTS guest_credentials (user_id TEXT PRIMARY KEY, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, iterations INTEGER NOT NULL DEFAULT 210000, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES users(id))`,
+    `CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, return_to TEXT NOT NULL DEFAULT '/', bind_user_id TEXT, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS auth_attempts (attempt_key TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_started_at TEXT NOT NULL, locked_until TEXT)`,
     `CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(owner_id) REFERENCES users(id))`,
     `CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, user_id), FOREIGN KEY(group_id) REFERENCES groups(id), FOREIGN KEY(user_id) REFERENCES users(id))`,
     `CREATE TABLE IF NOT EXISTS invite_codes (code TEXT PRIMARY KEY, group_id TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(group_id) REFERENCES groups(id))`,
@@ -36,6 +46,9 @@ async function initializeDatabase() {
     `CREATE INDEX IF NOT EXISTS analyses_meal_idx ON meal_analyses(meal_id, version DESC)`,
   ];
   await db.batch(statements.map((sql) => db.prepare(sql)));
+  await db.prepare(`ALTER TABLE users ADD COLUMN avatar_key TEXT`).run().catch((error) => {
+    if (!(error instanceof Error) || !error.message.toLowerCase().includes("duplicate column")) throw error;
+  });
 
   await db.batch([
     db.prepare(`INSERT OR IGNORE INTO users (id, auth_provider, auth_subject, display_name, avatar_url) VALUES (?, 'demo', ?, ?, ?)`)
@@ -79,4 +92,8 @@ async function initializeDatabase() {
     db.prepare(`INSERT OR IGNORE INTO meal_analyses (id, meal_id, version, result_json, source, model, confirmed) VALUES ('analysis-lunch', 'sample-lunch', 1, ?, 'demo', 'demo-nutrition-v1', 1)`).bind(lunchAnalysis),
     db.prepare(`INSERT OR IGNORE INTO meal_analyses (id, meal_id, version, result_json, source, model, confirmed) VALUES ('analysis-dinner', 'sample-dinner', 1, ?, 'demo', 'demo-nutrition-v1', 1)`).bind(lunchAnalysis),
   ]);
+
+  await db.prepare(`INSERT OR IGNORE INTO user_identities (provider, subject, user_id) SELECT auth_provider, auth_subject, id FROM users`).run();
+  await db.prepare(`DELETE FROM sessions WHERE expires_at <= ?`).bind(new Date().toISOString()).run();
+  await db.prepare(`DELETE FROM oauth_states WHERE expires_at <= ? OR used_at IS NOT NULL`).bind(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()).run();
 }

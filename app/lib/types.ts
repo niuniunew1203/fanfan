@@ -5,7 +5,13 @@ export type User = {
   id: string;
   displayName: string;
   avatarUrl: string;
-  authProvider: "demo" | "wechat";
+  authProvider: "demo" | "guest" | "wechat";
+};
+
+export type AuthCapabilities = {
+  guestEnabled: true;
+  demoEnabled: boolean;
+  wechatEnabled: boolean;
 };
 
 export type NutritionItem = {
@@ -50,6 +56,7 @@ export type Group = {
   name: string;
   role: "owner" | "member";
   inviteCode: string | null;
+  inviteUrl?: string | null;
 };
 
 export type AppState = {

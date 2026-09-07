@@ -1,5 +1,5 @@
 export type AuthProfile = {
-  provider: "demo" | "wechat";
+  provider: "demo" | "guest" | "wechat";
   subject: string;
   displayName: string;
   avatarUrl: string;
