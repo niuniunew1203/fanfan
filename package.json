@@ -14,10 +14,11 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate:cloudflare": "wrangler d1 migrations apply fanfan-diary-db --remote",
     "deploy:cloudflare": "vinext build && wrangler deploy",
-    "deploy:edgeone": "next build"
+    "deploy:edgeone": "next build",
+    "deploy:netlify": "netlify deploy --prod"
   },
   "dependencies": {
-    "@edgeone/pages-blob": "^0.0.16",
+    "@netlify/blobs": "^11.0.3",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
     "postgres": "^3.4.9",

@@ -1,5 +1,5 @@
 import postgres, { type Sql } from "postgres";
-import { getStore } from "@edgeone/pages-blob";
+import { getStore } from "@netlify/blobs";
 
 export type StoredImage = {
   body: ReadableStream<Uint8Array>;
@@ -35,7 +35,7 @@ const imageStore = {
     await getStore("fanfan-diary-images").set(key, value);
   },
   async get(key: string): Promise<StoredImage | null> {
-    const value = await getStore("fanfan-diary-images").get(key, { type: "blob", consistency: "strong" });
+    const value = await getStore("fanfan-diary-images").get(key, { type: "blob" });
     if (!(value instanceof Blob)) return null;
     const contentType = value.type || contentTypeForKey(key);
     return {
