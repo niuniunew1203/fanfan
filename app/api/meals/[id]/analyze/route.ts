@@ -1,4 +1,4 @@
-import { getBindings, getD1 } from "../../../../../db";
+import { getBindings, getD1, type StoredImage } from "../../../../../db";
 import { requireMembership, requireUser, routeError } from "../../../../lib/auth";
 import { demoNutrition, validateNutrition } from "../../../../lib/meals";
 import type { NutritionItem } from "../../../../lib/types";
@@ -54,7 +54,7 @@ function responseText(payload: Record<string, unknown>) {
   throw new Error("AI 未返回可读取的营养结果");
 }
 
-async function callOpenAI(image: R2ObjectBody, note: string, corrections: NutritionItem[] | undefined) {
+async function callOpenAI(image: StoredImage, note: string, corrections: NutritionItem[] | undefined) {
   const bindings = getBindings();
   const apiKey = bindings.OPENAI_API_KEY;
   if (!apiKey) {

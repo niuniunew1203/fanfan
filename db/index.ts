@@ -1,24 +1,127 @@
-import { env } from "cloudflare:workers";
+import postgres, { type Sql } from "postgres";
+import { getStore } from "@edgeone/pages-blob";
+
+export type StoredImage = {
+  body: ReadableStream<Uint8Array>;
+  httpEtag: string;
+  httpMetadata: { contentType?: string; cacheControl?: string };
+  writeHttpMetadata(headers: Headers): void;
+  arrayBuffer(): Promise<ArrayBuffer>;
+};
 
 export type AppEnv = {
-  DB: D1Database;
-  MEAL_IMAGES: R2Bucket;
+  DATABASE_URL?: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
   WECHAT_APP_ID?: string;
   WECHAT_APP_SECRET?: string;
   WECHAT_OAUTH_ORIGIN?: string;
   DEMO_AUTH_ENABLED?: string;
+  MEAL_IMAGES: {
+    put(key: string, value: ArrayBuffer, options?: unknown): Promise<void>;
+    get(key: string): Promise<StoredImage | null>;
+    delete(key: string): Promise<void>;
+  };
 };
 
-export function getBindings() {
-  return env as unknown as AppEnv;
+function contentTypeForKey(key: string) {
+  if (/\.png$/i.test(key)) return "image/png";
+  if (/\.webp$/i.test(key)) return "image/webp";
+  return "image/jpeg";
+}
+
+const imageStore = {
+  async put(key: string, value: ArrayBuffer) {
+    await getStore("fanfan-diary-images").set(key, value);
+  },
+  async get(key: string): Promise<StoredImage | null> {
+    const value = await getStore("fanfan-diary-images").get(key, { type: "blob", consistency: "strong" });
+    if (!(value instanceof Blob)) return null;
+    const contentType = value.type || contentTypeForKey(key);
+    return {
+      body: value.stream(),
+      httpEtag: `\"${key.replace(/[^a-zA-Z0-9]/g, "")}\"`,
+      httpMetadata: { contentType, cacheControl: "private, max-age=3600" },
+      writeHttpMetadata(headers: Headers) { headers.set("content-type", contentType); },
+      arrayBuffer: () => value.arrayBuffer(),
+    };
+  },
+  async delete(key: string) {
+    await getStore("fanfan-diary-images").delete(key);
+  },
+};
+
+export function getBindings(): AppEnv {
+  return {
+    DATABASE_URL: process.env.DATABASE_URL,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    OPENAI_MODEL: process.env.OPENAI_MODEL,
+    WECHAT_APP_ID: process.env.WECHAT_APP_ID,
+    WECHAT_APP_SECRET: process.env.WECHAT_APP_SECRET,
+    WECHAT_OAUTH_ORIGIN: process.env.WECHAT_OAUTH_ORIGIN,
+    DEMO_AUTH_ENABLED: process.env.DEMO_AUTH_ENABLED,
+    MEAL_IMAGES: imageStore,
+  };
+}
+
+let sqlClient: Sql | null = null;
+
+function getSql() {
+  if (sqlClient) return sqlClient;
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) throw new Error("DATABASE_URL is unavailable");
+  sqlClient = postgres(connectionString, { max: 5, idle_timeout: 20, connect_timeout: 15, ssl: "require" });
+  return sqlClient;
+}
+
+function normalizeSql(input: string) {
+  let index = 0;
+  let output = input
+    .replace(/datetime\('now',\s*'-2 minutes'\)/gi, "(CURRENT_TIMESTAMP - INTERVAL '2 minutes')")
+    .replace(/date\('now',\s*'\+8 hours',\s*'-1 day'\)/gi, "((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai') - INTERVAL '1 day')::date::text")
+    .replace(/date\('now',\s*'\+8 hours'\)/gi, "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date::text")
+    .replace(/\?/g, () => `$${++index}`);
+  if (/^\s*INSERT\s+OR\s+IGNORE\s+/i.test(output)) {
+    output = output.replace(/^\s*INSERT\s+OR\s+IGNORE\s+/i, "INSERT ");
+    output = `${output.replace(/;\s*$/, "")} ON CONFLICT DO NOTHING`;
+  }
+  return output;
+}
+
+function normalizeRow<T>(row: Record<string, unknown>): T {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, value instanceof Date ? value.toISOString() : value])) as T;
+}
+
+class PreparedStatement {
+  private values: unknown[] = [];
+  constructor(private readonly source: string, private readonly executor?: Sql) {}
+  bind(...values: unknown[]) { this.values = values; return this; }
+  private async execute() {
+    const client = this.executor ?? getSql();
+    return client.unsafe(normalizeSql(this.source), this.values as never[]);
+  }
+  async first<T = Record<string, unknown>>(): Promise<T | null> {
+    const rows = await this.execute();
+    return rows[0] ? normalizeRow<T>(rows[0] as Record<string, unknown>) : null;
+  }
+  async all<T = Record<string, unknown>>() {
+    const rows = await this.execute();
+    return { results: rows.map((row) => normalizeRow<T>(row as Record<string, unknown>)) };
+  }
+  async run() {
+    const rows = await this.execute();
+    return { success: true, meta: { changes: rows.count ?? 0 } };
+  }
+  clone(executor: Sql) { return new PreparedStatement(this.source, executor).bind(...this.values); }
 }
 
 export function getD1() {
-  const { DB } = getBindings();
-  if (!DB) throw new Error("D1 binding DB is unavailable");
-  return DB;
+  return {
+    prepare(source: string) { return new PreparedStatement(source); },
+    async batch(statements: PreparedStatement[]) {
+      return getSql().begin(async (transaction) => Promise.all(statements.map((statement) => statement.clone(transaction as unknown as Sql).run())));
+    },
+  };
 }
 
 let ready: Promise<void> | null = null;
@@ -31,69 +134,22 @@ export async function ensureDatabase() {
 async function initializeDatabase() {
   const db = getD1();
   const statements = [
-    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, auth_provider TEXT NOT NULL, auth_subject TEXT NOT NULL, display_name TEXT NOT NULL, avatar_url TEXT NOT NULL, avatar_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(auth_provider, auth_subject))`,
-    `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES users(id))`,
-    `CREATE TABLE IF NOT EXISTS user_identities (provider TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(provider, subject), FOREIGN KEY(user_id) REFERENCES users(id))`,
-    `CREATE TABLE IF NOT EXISTS guest_credentials (user_id TEXT PRIMARY KEY, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, iterations INTEGER NOT NULL DEFAULT 210000, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES users(id))`,
-    `CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, return_to TEXT NOT NULL DEFAULT '/', bind_user_id TEXT, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, auth_provider TEXT NOT NULL, auth_subject TEXT NOT NULL, display_name TEXT NOT NULL, avatar_url TEXT NOT NULL, avatar_key TEXT, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text), UNIQUE(auth_provider, auth_subject))`,
+    `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text))`,
+    `CREATE TABLE IF NOT EXISTS user_identities (provider TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text), UNIQUE(provider, subject))`,
+    `CREATE TABLE IF NOT EXISTS guest_credentials (user_id TEXT PRIMARY KEY REFERENCES users(id), pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, iterations INTEGER NOT NULL DEFAULT 210000, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text))`,
+    `CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, return_to TEXT NOT NULL DEFAULT '/', bind_user_id TEXT, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text))`,
     `CREATE TABLE IF NOT EXISTS auth_attempts (attempt_key TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_started_at TEXT NOT NULL, locked_until TEXT)`,
-    `CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(owner_id) REFERENCES users(id))`,
-    `CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, user_id), FOREIGN KEY(group_id) REFERENCES groups(id), FOREIGN KEY(user_id) REFERENCES users(id))`,
-    `CREATE TABLE IF NOT EXISTS invite_codes (code TEXT PRIMARY KEY, group_id TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(group_id) REFERENCES groups(id))`,
-    `CREATE TABLE IF NOT EXISTS meals (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, author_id TEXT NOT NULL, meal_date TEXT NOT NULL, meal_type TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', image_key TEXT NOT NULL, analysis_status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, author_id, meal_date, meal_type), FOREIGN KEY(group_id) REFERENCES groups(id), FOREIGN KEY(author_id) REFERENCES users(id))`,
-    `CREATE TABLE IF NOT EXISTS meal_analyses (id TEXT PRIMARY KEY, meal_id TEXT NOT NULL, version INTEGER NOT NULL, result_json TEXT NOT NULL, source TEXT NOT NULL, model TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, error_message TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(meal_id, version), FOREIGN KEY(meal_id) REFERENCES meals(id))`,
+    `CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text))`,
+    `CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL REFERENCES groups(id), user_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL DEFAULT 'member', joined_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text), UNIQUE(group_id, user_id))`,
+    `CREATE TABLE IF NOT EXISTS invite_codes (code TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups(id), active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text))`,
+    `CREATE TABLE IF NOT EXISTS meals (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups(id), author_id TEXT NOT NULL REFERENCES users(id), meal_date TEXT NOT NULL, meal_type TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', image_key TEXT NOT NULL, analysis_status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text), updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text), UNIQUE(group_id, author_id, meal_date, meal_type))`,
+    `CREATE TABLE IF NOT EXISTS meal_analyses (id TEXT PRIMARY KEY, meal_id TEXT NOT NULL REFERENCES meals(id), version INTEGER NOT NULL, result_json TEXT NOT NULL, source TEXT NOT NULL, model TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, error_message TEXT, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text), UNIQUE(meal_id, version))`,
     `CREATE INDEX IF NOT EXISTS meals_group_date_idx ON meals(group_id, meal_date, created_at)`,
     `CREATE INDEX IF NOT EXISTS analyses_meal_idx ON meal_analyses(meal_id, version DESC)`,
   ];
-  await db.batch(statements.map((sql) => db.prepare(sql)));
-  await db.prepare(`ALTER TABLE users ADD COLUMN avatar_key TEXT`).run().catch((error) => {
-    if (!(error instanceof Error) || !error.message.toLowerCase().includes("duplicate column")) throw error;
-  });
-
-  await db.batch([
-    db.prepare(`INSERT OR IGNORE INTO users (id, auth_provider, auth_subject, display_name, avatar_url) VALUES (?, 'demo', ?, ?, ?)`)
-      .bind("demo-lin", "demo-lin", "小林", "/avatars/lin.jpg"),
-    db.prepare(`INSERT OR IGNORE INTO users (id, auth_provider, auth_subject, display_name, avatar_url) VALUES (?, 'demo', ?, ?, ?)`)
-      .bind("demo-mum", "demo-mum", "妈妈", "/avatars/mum.jpg"),
-    db.prepare(`INSERT OR IGNORE INTO users (id, auth_provider, auth_subject, display_name, avatar_url) VALUES (?, 'demo', ?, ?, ?)`)
-      .bind("demo-chen", "demo-chen", "阿辰", "/avatars/chen.jpg"),
-    db.prepare(`INSERT OR IGNORE INTO groups (id, name, owner_id) VALUES ('demo-family', '我们家', 'demo-lin')`),
-    db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, role) VALUES ('demo-family', 'demo-lin', 'owner')`),
-    db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, role) VALUES ('demo-family', 'demo-mum', 'member')`),
-    db.prepare(`INSERT OR IGNORE INTO group_members (group_id, user_id, role) VALUES ('demo-family', 'demo-chen', 'member')`),
-    db.prepare(`INSERT OR IGNORE INTO invite_codes (code, group_id, active) VALUES ('FANFAN88', 'demo-family', 1)`),
-  ]);
-
-  const breakfastAnalysis = JSON.stringify({
-    items: [
-      { name: "杂粮粥", estimatedGrams: 280, caloriesKcal: 180, proteinG: 5.2, carbsG: 35, fatG: 2.1, confidence: "medium" },
-      { name: "水煮蛋", estimatedGrams: 55, caloriesKcal: 78, proteinG: 6.5, carbsG: 0.6, fatG: 5.3, confidence: "high" },
-      { name: "清爽小菜", estimatedGrams: 100, caloriesKcal: 72, proteinG: 2.6, carbsG: 8, fatG: 3.6, confidence: "medium" },
-    ],
-    totals: { caloriesKcal: 330, proteinG: 14.3, carbsG: 43.6, fatG: 11, fiberG: 6.2, sodiumMg: 480 },
-    comment: "谷物、蛋白质和蔬菜都有，清爽又均衡。",
-    caveat: "图片估算可能受份量和烹调油影响，请按实际情况核对。",
-  });
-  const lunchAnalysis = JSON.stringify({
-    items: [
-      { name: "米饭", estimatedGrams: 170, caloriesKcal: 197, proteinG: 4.4, carbsG: 43.8, fatG: 0.5, confidence: "high" },
-      { name: "时蔬炒肉", estimatedGrams: 220, caloriesKcal: 298, proteinG: 25, carbsG: 15, fatG: 16, confidence: "medium" },
-      { name: "清汤", estimatedGrams: 220, caloriesKcal: 65, proteinG: 5, carbsG: 6, fatG: 2, confidence: "low" },
-    ],
-    totals: { caloriesKcal: 560, proteinG: 34.4, carbsG: 64.8, fatG: 18.5, fiberG: 8.5, sodiumMg: 760 },
-    comment: "蔬菜和优质蛋白较充足，整体份量适中。",
-    caveat: "汤和酱汁的含盐量难以仅凭图片判断。",
-  });
-  await db.batch([
-    db.prepare(`INSERT OR IGNORE INTO meals (id, group_id, author_id, meal_date, meal_type, note, image_key, analysis_status) VALUES ('sample-breakfast', 'demo-family', 'demo-mum', date('now', '+8 hours'), 'breakfast', '早起的一碗热粥，今天也要好好吃饭', '/sample-breakfast.jpg', 'confirmed')`),
-    db.prepare(`INSERT OR IGNORE INTO meals (id, group_id, author_id, meal_date, meal_type, note, image_key, analysis_status) VALUES ('sample-lunch', 'demo-family', 'demo-chen', date('now', '+8 hours'), 'lunch', '家常午饭，青菜是今天刚买的', '/sample-lunch.jpg', 'confirmed')`),
-    db.prepare(`INSERT OR IGNORE INTO meals (id, group_id, author_id, meal_date, meal_type, note, image_key, analysis_status) VALUES ('sample-dinner', 'demo-family', 'demo-lin', date('now', '+8 hours', '-1 day'), 'dinner', '下班后的简单晚餐', '/sample-dinner.jpg', 'confirmed')`),
-    db.prepare(`INSERT OR IGNORE INTO meal_analyses (id, meal_id, version, result_json, source, model, confirmed) VALUES ('analysis-breakfast', 'sample-breakfast', 1, ?, 'demo', 'demo-nutrition-v1', 1)`).bind(breakfastAnalysis),
-    db.prepare(`INSERT OR IGNORE INTO meal_analyses (id, meal_id, version, result_json, source, model, confirmed) VALUES ('analysis-lunch', 'sample-lunch', 1, ?, 'demo', 'demo-nutrition-v1', 1)`).bind(lunchAnalysis),
-    db.prepare(`INSERT OR IGNORE INTO meal_analyses (id, meal_id, version, result_json, source, model, confirmed) VALUES ('analysis-dinner', 'sample-dinner', 1, ?, 'demo', 'demo-nutrition-v1', 1)`).bind(lunchAnalysis),
-  ]);
-
-  await db.prepare(`INSERT OR IGNORE INTO user_identities (provider, subject, user_id) SELECT auth_provider, auth_subject, id FROM users`).run();
+  await db.batch(statements.map((statement) => db.prepare(statement)));
+  await db.prepare(`INSERT INTO user_identities (provider, subject, user_id) SELECT auth_provider, auth_subject, id FROM users ON CONFLICT DO NOTHING`).run();
   await db.prepare(`DELETE FROM sessions WHERE expires_at <= ?`).bind(new Date().toISOString()).run();
-  await db.prepare(`DELETE FROM oauth_states WHERE expires_at <= ? OR used_at IS NOT NULL`).bind(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()).run();
+  await db.prepare(`DELETE FROM oauth_states WHERE expires_at <= ? OR used_at IS NOT NULL`).bind(new Date(Date.now() - 86400000).toISOString()).run();
 }
