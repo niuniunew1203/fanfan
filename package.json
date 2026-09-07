@@ -11,7 +11,9 @@
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/security-contract.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:cloudflare": "wrangler d1 migrations apply fanfan-diary-db --remote",
+    "deploy:cloudflare": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

@@ -26,6 +26,10 @@ npm run dev
 
 公开站点仍由应用内会话保护。家人可使用高熵邀请码、昵称、头像和 6 位数字口令创建或加入家庭，口令以随机盐 PBKDF2 哈希保存。微信身份与内部用户通过 `user_identities` 解耦，后续绑定不会迁移或复制餐食数据。
 
+## Cloudflare 直部署
+
+项目可直接通过 `wrangler.jsonc` 部署到 Cloudflare Workers，无需依赖 GitHub Actions。配置使用 D1 绑定 `DB`、私有 R2 绑定 `MEAL_IMAGES` 和静态资源绑定 `ASSETS`；运行 `npm run db:migrate:cloudflare` 应用远程迁移，运行 `npm run deploy:cloudflare` 构建并发布。
+
 密钥不得进入浏览器代码或提交到版本库。
 
 ## 数据与权限
