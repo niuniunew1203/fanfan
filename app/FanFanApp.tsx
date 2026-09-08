@@ -220,7 +220,7 @@ function UploadView({ onDone, onAnalyzed }: { onDone: (mealId: string) => Promis
   return <div className="view upload-view"><header className="simple-header"><p className="eyebrow">留住此刻</p><h1>记下这顿饭</h1><p>一张照片，就是今天最具体的记忆。</p></header>
     <form onSubmit={submit} className="upload-form">
       <button type="button" className={`photo-picker ${preview ? "has-photo" : ""}`} onClick={() => inputRef.current?.click()}>{preview ? <img src={preview} alt="待上传餐食"/> : <><span className="camera-icon">◎</span><strong>拍照或选择照片</strong><small>支持 JPEG、PNG、WebP · 最大 10 MB</small></>}<i>{preview ? "更换照片" : ""}</i></button>
-      <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onChange={(event) => choose(event.target.files?.[0] ?? null)}/>
+      <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(event) => choose(event.target.files?.[0] ?? null)}/>
       <fieldset><legend>这是哪一餐？</legend><div className="segment-control">{(Object.keys(MEAL_META) as MealType[]).map((type) => <button type="button" key={type} className={mealType === type ? "active" : ""} onClick={() => setMealType(type)}><span>{MEAL_META[type].icon}</span>{MEAL_META[type].label}</button>)}</div></fieldset>
       <label className="field"><span>日期</span><input type="date" max={localDate()} value={mealDate} onChange={(event) => setMealDate(event.target.value)} required/></label>
       <label className="field"><span>说两句 <small>选填</small></span><textarea value={note} onChange={(event) => setNote(event.target.value.slice(0,200))} placeholder="比如：妈妈今天做了我最爱的番茄炒蛋…" rows={3}/><i>{note.length}/200</i></label>
