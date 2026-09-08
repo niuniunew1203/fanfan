@@ -77,7 +77,7 @@ function getSql() {
 function normalizeSql(input: string) {
   let index = 0;
   let output = input
-    .replace(/datetime\('now',\s*'-2 minutes'\)/gi, "(CURRENT_TIMESTAMP - INTERVAL '2 minutes')")
+    .replace(/datetime\('now',\s*'-2 minutes'\)/gi, "((CURRENT_TIMESTAMP - INTERVAL '2 minutes')::text)")
     .replace(/date\('now',\s*'\+8 hours',\s*'-1 day'\)/gi, "((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai') - INTERVAL '1 day')::date::text")
     .replace(/date\('now',\s*'\+8 hours'\)/gi, "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date::text")
     .replace(/\?/g, () => `$${++index}`);

@@ -32,8 +32,10 @@ test("WeChat OAuth state is expiring and single use", async () => {
 
 test("AI uses runtime bindings, strict JSON and a 45 second timeout", async () => {
   const analyze = await read("app/api/meals/[id]/analyze/route.ts");
+  const database = await read("db/index.ts");
   assert.doesNotMatch(analyze, /process\.env/);
   assert.match(analyze, /strict: true/);
   assert.match(analyze, /AbortSignal\.timeout\(45_000\)/);
   assert.match(analyze, /analysis_locked/);
+  assert.match(database, /INTERVAL '2 minutes'\)\:\:text/);
 });
