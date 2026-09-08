@@ -19,6 +19,14 @@ function readCookie(request: Request, name: string) {
   return cookies.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
 }
 
+export async function requireSessionTokenHash(request: Request) {
+  requireSameOrigin(request);
+  await ensureDatabase();
+  const token = readCookie(request, COOKIE_NAME);
+  if (!token) throw Response.json({ error: "请先登录" }, { status: 401 });
+  return hashToken(token);
+}
+
 export function requireSameOrigin(request: Request) {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method.toUpperCase())) return;
   const origin = request.headers.get("origin");
@@ -59,6 +67,27 @@ export async function getCurrentUser(request: Request): Promise<User | null> {
   const row = await getD1().prepare(`SELECT u.id, u.display_name, u.avatar_url, u.auth_provider FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?`).bind(await hashToken(token), new Date().toISOString()).first<Record<string, string>>();
   if (!row) return null;
   return { id: row.id, displayName: row.display_name, avatarUrl: row.avatar_url, authProvider: row.auth_provider as User["authProvider"] };
+}
+
+export async function getCurrentAppContext(request: Request) {
+  await ensureDatabase();
+  const token = readCookie(request, COOKIE_NAME);
+  if (!token) return null;
+  const row = await getD1().prepare(`
+    SELECT u.id user_id, u.display_name, u.avatar_url, u.auth_provider,
+      g.id group_id, g.name group_name, g.owner_id, gm.role,
+      (SELECT code FROM invite_codes WHERE group_id = g.id AND active = 1 ORDER BY created_at DESC LIMIT 1) invite_code
+    FROM sessions s
+    JOIN users u ON u.id = s.user_id
+    LEFT JOIN group_members gm ON gm.user_id = u.id
+    LEFT JOIN groups g ON g.id = gm.group_id
+    WHERE s.token_hash = ? AND s.expires_at > ?
+    LIMIT 1
+  `).bind(await hashToken(token), new Date().toISOString()).first<Record<string, string | null>>();
+  if (!row) return null;
+  const user: User = { id: String(row.user_id), displayName: String(row.display_name), avatarUrl: String(row.avatar_url), authProvider: row.auth_provider as User["authProvider"] };
+  const membership = row.group_id ? { id: String(row.group_id), name: String(row.group_name), ownerId: String(row.owner_id), role: row.role as "owner" | "member", inviteCode: row.invite_code ?? null } : null;
+  return { user, membership };
 }
 
 export async function requireUser(request: Request) {

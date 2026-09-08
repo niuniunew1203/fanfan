@@ -2,7 +2,6 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import QRCode from "qrcode";
 import type { AppState, AuthCapabilities, Meal, MealType, NutritionItem } from "./lib/types";
 
 const PERSONAS = [
@@ -124,7 +123,7 @@ function LoginScreen({ capabilities, onDemoLogin, onAuthenticated, onToast }: { 
       if (mode === "login") {
         await api("/api/auth/guest/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ inviteCode, displayName, pin }) });
       } else {
-        const form = new FormData(); form.set("mode", mode); form.set("displayName", displayName); form.set("pin", pin); form.set("inviteCode", inviteCode); form.set("groupName", groupName); if (avatar) form.set("avatar", avatar);
+        const form = new FormData(); form.set("mode", mode); form.set("displayName", displayName); form.set("pin", pin); form.set("inviteCode", inviteCode); form.set("groupName", groupName); if (avatar) form.set("avatar", await compressImage(avatar, 320, .78));
         await api("/api/auth/guest/register", { method: "POST", body: form });
       }
       await onAuthenticated();
@@ -160,7 +159,7 @@ function HomeView({ state, selectedDate, setSelectedDate, onOpen, onUpload }: { 
   const calories = dayMeals.reduce((sum, meal) => sum + (meal.analysis?.confirmed ? meal.analysis.totals.caloriesKcal : 0), 0);
   function shift(days: number) { const date = new Date(`${selectedDate}T12:00:00`); date.setDate(date.getDate() + days); setSelectedDate(`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`); }
   return <div className="view home-view">
-    <header className="topbar"><div><p className="eyebrow">{state.group?.name} · {state.members.length} 位成员</p><h1>今天，吃了什么？</h1></div><div className="avatar-stack">{state.members.slice(0,3).map((member) => <img key={member.id} src={member.avatarUrl} alt={member.displayName}/>)}</div></header>
+    <header className="topbar"><div><p className="eyebrow">{state.group?.name} · {state.members.length} 位成员</p><h1>今天，吃了什么？</h1></div><div className="avatar-stack">{state.members.slice(0,3).map((member) => <img key={member.id} src={member.avatarUrl} alt={member.displayName} width={34} height={34} decoding="async"/>)}</div></header>
     <section className="date-strip"><button onClick={() => shift(-1)} aria-label="前一天">‹</button><div><strong>{friendlyDate(selectedDate)}</strong><span>{selectedDate.replaceAll("-", " · ")}</span></div><button onClick={() => shift(1)} aria-label="后一天" disabled={selectedDate >= localDate()}>›</button></section>
     <section className="day-summary"><div><span className="summary-kicker">今日已记录</span><strong>{dayMeals.length}<small> / {state.members.length * 3} 餐</small></strong></div><div className="summary-line"/><div><span className="summary-kicker">全家总计</span><strong>{Math.round(calories)}<small> kcal</small></strong></div><div className="grain-dot dot-one"/><div className="grain-dot dot-two"/></section>
     <div className="meal-timeline">
@@ -179,23 +178,43 @@ function HomeView({ state, selectedDate, setSelectedDate, onOpen, onUpload }: { 
 function MealCard({ meal, onClick }: { meal: Meal; onClick: () => void }) {
   const kcal = meal.analysis?.totals.caloriesKcal;
   return <button className="meal-card" onClick={onClick}>
-    <div className="meal-photo"><img src={meal.imageUrl} alt={meal.note || `${MEAL_META[meal.mealType].label}照片`}/><span className={`analysis-pill ${meal.analysisStatus}`}>{meal.analysisStatus === "confirmed" ? "AI 已确认" : meal.analysisStatus === "draft" ? "待确认" : meal.analysisStatus === "failed" ? "分析失败" : "AI 分析中"}</span></div>
-    <div className="meal-body"><div className="author-row"><img src={meal.author.avatarUrl} alt=""/><strong>{meal.author.displayName}</strong><time>{new Date(`${meal.createdAt.replace(" ", "T")}Z`).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time></div>
+    <div className="meal-photo"><img src={meal.imageUrl} alt={meal.note || `${MEAL_META[meal.mealType].label}照片`} loading="lazy" decoding="async"/><span className={`analysis-pill ${meal.analysisStatus}`}>{meal.analysisStatus === "confirmed" ? "AI 已确认" : meal.analysisStatus === "draft" ? "待确认" : meal.analysisStatus === "failed" ? "分析失败" : "AI 分析中"}</span></div>
+    <div className="meal-body"><div className="author-row"><img src={meal.author.avatarUrl} alt="" width={25} height={25} loading="lazy" decoding="async"/><strong>{meal.author.displayName}</strong><time>{new Date(`${meal.createdAt.replace(" ", "T")}Z`).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time></div>
       <p>{meal.note || "这一餐没有留下文字，只留下了好味道。"}</p>
       <div className="nutrition-mini"><span><b>{kcal ? Math.round(kcal) : "—"}</b> kcal</span><span>蛋白 {meal.analysis ? Math.round(meal.analysis.totals.proteinG) : "—"}g</span><i>查看详情 →</i></div>
     </div>
   </button>;
 }
 
-async function compressMealImage(file: File) {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
+async function decodeImage(file: File) {
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(file);
+    return { source: bitmap as CanvasImageSource, width: bitmap.width, height: bitmap.height, cleanup: () => bitmap.close() };
+  }
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  image.src = url;
+  await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error("图片读取失败")); });
+  return { source: image as CanvasImageSource, width: image.naturalWidth, height: image.naturalHeight, cleanup: () => URL.revokeObjectURL(url) };
+}
+
+async function compressImage(file: File, maxDimension: number, quality: number) {
+  const decoded = await decodeImage(file);
+  const scale = Math.min(1, maxDimension / Math.max(decoded.width, decoded.height));
   const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-  canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", .86));
+  canvas.width = Math.max(1, Math.round(decoded.width * scale)); canvas.height = Math.max(1, Math.round(decoded.height * scale));
+  const context = canvas.getContext("2d");
+  if (context) context.fillStyle = "#ffffff";
+  context?.fillRect(0, 0, canvas.width, canvas.height);
+  context?.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
+  decoded.cleanup();
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
   if (!blob || blob.size >= file.size) return file;
   return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg", lastModified: Date.now() });
+}
+
+async function compressMealImage(file: File) {
+  return compressImage(file, 1440, .8);
 }
 
 function UploadView({ onDone, onAnalyzed }: { onDone: (mealId: string) => Promise<void>; onAnalyzed: () => Promise<void> }) {
@@ -234,7 +253,11 @@ function UploadView({ onDone, onAnalyzed }: { onDone: (mealId: string) => Promis
 
 function InviteQr({ value }: { value: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => { if (ref.current) QRCode.toCanvas(ref.current, value, { width: 152, margin: 1, color: { dark: "#315f45", light: "#fffdf8" } }).catch(() => undefined); }, [value]);
+  useEffect(() => {
+    let active = true;
+    import("qrcode").then(({ default: QRCode }) => { if (active && ref.current) return QRCode.toCanvas(ref.current, value, { width: 152, margin: 1, color: { dark: "#315f45", light: "#fffdf8" } }); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [value]);
   return <canvas className="invite-qr" ref={ref} aria-label="家庭邀请二维码"/>;
 }
 
@@ -244,7 +267,7 @@ function FamilyView({ state, onRefresh, onToast }: { state: AppState; onRefresh:
   async function rotate() { setBusy(true); try { await api("/api/groups/invite/rotate", { method: "POST" }); await onRefresh(); onToast("已生成新的邀请码"); } catch (error) { onToast((error as Error).message); } finally { setBusy(false); } }
   return <div className="view family-view"><header className="simple-header"><p className="eyebrow">一起吃饭的人</p><h1>{state.group?.name}</h1><p>生活各自忙碌，饭桌让我们常常见面。</p></header>
     <section className="family-hero"><div className="family-monogram">家</div><div><span>家庭相册</span><strong>{state.members.length} 位成员 · {state.meals.length} 顿饭</strong></div></section>
-    <section className="panel"><div className="panel-title"><h2>家庭成员</h2><span>{state.members.length} 人</span></div><div className="member-list">{state.members.map((member, index) => <div className="member-row" key={member.id}><img src={member.avatarUrl} alt=""/><div><strong>{member.displayName}{member.id === state.user?.id && <small> 我</small>}</strong><p>{index === 0 ? "创建了这个家" : "一起记录三餐"}</p></div><span>{index === 0 ? "组长" : "成员"}</span></div>)}</div></section>
+    <section className="panel"><div className="panel-title"><h2>家庭成员</h2><span>{state.members.length} 人</span></div><div className="member-list">{state.members.map((member, index) => <div className="member-row" key={member.id}><img src={member.avatarUrl} alt="" width={43} height={43} loading="lazy" decoding="async"/><div><strong>{member.displayName}{member.id === state.user?.id && <small> 我</small>}</strong><p>{index === 0 ? "创建了这个家" : "一起记录三餐"}</p></div><span>{index === 0 ? "组长" : "成员"}</span></div>)}</div></section>
     <section className="invite-card"><p>邀请家人加入</p>{state.group?.role === "owner" ? <><div className="invite-share">{state.group.inviteUrl && <InviteQr value={state.group.inviteUrl}/>}<div><div className="invite-code"><strong>{state.group.inviteCode}</strong><button onClick={copyCode}>复制链接</button></div><small>让家人扫码或打开链接，即可自动填入邀请码。</small></div></div><button className="text-button" onClick={rotate} disabled={busy}>{busy ? "正在更新…" : "旧码泄露了？生成新邀请码"}</button></> : <div className="member-invite-note">向家庭创建者索取邀请码，可邀请更多家人加入。</div>}</section>
     <section className="privacy-note"><span>⌂</span><div><strong>只有家人能看到</strong><p>餐食图片通过成员身份校验后加载，不会生成公开图片链接。</p></div></section>
   </div>;
@@ -253,7 +276,7 @@ function FamilyView({ state, onRefresh, onToast }: { state: AppState; onRefresh:
 function ProfileView({ state, capabilities, onLogout }: { state: AppState; capabilities: AuthCapabilities; onLogout: () => void }) {
   const mine = state.meals.filter((meal) => meal.author.id === state.user?.id);
   async function bindWechat() { const result = await api<{ url: string }>("/api/auth/wechat/bind", { method: "POST" }); window.location.href = result.url; }
-  return <div className="view profile-view"><header className="profile-header"><img src={state.user?.avatarUrl} alt=""/><div><span className="demo-chip">{state.user?.authProvider === "wechat" ? "微信账号" : state.user?.authProvider === "guest" ? "家庭账号" : "演示身份"}</span><h1>{state.user?.displayName}</h1><p>已和家人记录 {mine.length} 顿饭</p></div></header>
+  return <div className="view profile-view"><header className="profile-header"><img src={state.user?.avatarUrl} alt="" width={76} height={76} decoding="async"/><div><span className="demo-chip">{state.user?.authProvider === "wechat" ? "微信账号" : state.user?.authProvider === "guest" ? "家庭账号" : "演示身份"}</span><h1>{state.user?.displayName}</h1><p>已和家人记录 {mine.length} 顿饭</p></div></header>
     <section className="profile-stats"><div><strong>{mine.length}</strong><span>餐食记录</span></div><div><strong>{mine.filter((meal) => meal.analysisStatus === "confirmed").length}</strong><span>营养分析</span></div><div><strong>{new Set(mine.map((meal) => meal.mealDate)).size}</strong><span>记录天数</span></div></section>
     <section className="panel profile-menu"><button onClick={() => { if (capabilities.wechatEnabled && state.user?.authProvider !== "wechat") bindWechat().catch(() => undefined); }} disabled={!capabilities.wechatEnabled || state.user?.authProvider === "wechat"}><span>微</span><div><strong>微信授权</strong><small>{capabilities.wechatEnabled ? "绑定后可以使用微信身份登录" : "微信登录暂未开放"}</small></div><i>{state.user?.authProvider === "wechat" ? "已绑定" : capabilities.wechatEnabled ? "去绑定" : "未开放"}</i></button><button><span>?</span><div><strong>关于营养估算</strong><small>AI 结果仅供饮食记录参考</small></div><i>›</i></button></section>
     <button className="logout-button" onClick={onLogout}>退出当前账号</button><p className="version-note">饭饭日记 · V2 家庭版</p>
@@ -279,7 +302,7 @@ function MealSheet({ meal, onClose, onRefresh, onToast }: { meal: Meal; onClose:
   async function confirmAnalysis() { return action(() => api(`/api/meals/${meal.id}/confirm-analysis`, { method:"POST" }), "营养结果已确认"); }
   async function remove() { if (!window.confirm("确定删除这顿饭吗？照片和营养结果也会一起删除。")) return; await action(() => api(`/api/meals/${meal.id}`, { method:"DELETE" }), "餐食记录已删除"); onClose(); }
   const totals = meal.analysis?.totals;
-  return <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><article className="meal-sheet"><button className="sheet-close" onClick={onClose} aria-label="关闭">×</button><div className="sheet-photo"><img src={meal.imageUrl} alt="餐食详情"/><div><img src={meal.author.avatarUrl} alt=""/><span><strong>{meal.author.displayName}的{MEAL_META[meal.mealType].label}</strong><small>{friendlyDate(meal.mealDate)}</small></span></div></div>
+  return <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><article className="meal-sheet"><button className="sheet-close" onClick={onClose} aria-label="关闭">×</button><div className="sheet-photo"><img src={meal.imageUrl} alt="餐食详情" decoding="async"/><div><img src={meal.author.avatarUrl} alt="" width={39} height={39} decoding="async"/><span><strong>{meal.author.displayName}的{MEAL_META[meal.mealType].label}</strong><small>{friendlyDate(meal.mealDate)}</small></span></div></div>
     <div className="sheet-content">{meal.canEdit ? <div className="meal-edit-fields"><div><label>日期<input type="date" max={localDate()} value={mealDate} onChange={(event)=>setMealDate(event.target.value)}/></label><label>餐次<select value={mealType} onChange={(event)=>setMealType(event.target.value as MealType)}>{(Object.keys(MEAL_META) as MealType[]).map((type)=><option key={type} value={type}>{MEAL_META[type].label}</option>)}</select></label></div><label className="sheet-note"><span>这一餐的故事</span><textarea value={note} onChange={(event)=>setNote(event.target.value.slice(0,200))} rows={2}/></label>{(note !== meal.note || mealDate !== meal.mealDate || mealType !== meal.mealType) && <button className="text-button" onClick={saveMeal} disabled={busy}>保存餐食信息</button>}</div> : <p className="sheet-story">{meal.note}</p>}
       {meal.analysis ? <section className="analysis-card"><div className="analysis-title"><div><span>AI 营养估算</span><h2>{Math.round(totals?.caloriesKcal ?? 0)} <small>kcal</small></h2></div><span className={meal.analysis.source === "demo" ? "demo-source" : "live-source"}>{meal.analysis.source === "demo" ? "演示数据" : "AI 分析"}</span></div><div className="macro-grid"><Macro label="蛋白质" value={totals?.proteinG}/><Macro label="碳水" value={totals?.carbsG}/><Macro label="脂肪" value={totals?.fatG}/><Macro label="膳食纤维" value={totals?.fiberG}/></div>
         <div className="food-items"><h3>识别到的食物</h3>{items.map((item,index)=><div className="food-row" key={`${item.name}-${index}`}><span className={`confidence ${item.confidence}`}/>{meal.canEdit && !meal.analysis?.confirmed ? <><input value={item.name} onChange={(event)=>setItems(items.map((current,i)=>i===index?{...current,name:event.target.value}:current))}/><label><input type="number" min="1" max="3000" value={item.estimatedGrams} onChange={(event)=>setItems(items.map((current,i)=>i===index?{...current,estimatedGrams:Number(event.target.value)}:current))}/> g</label></> : <><strong>{item.name}</strong><span>{Math.round(item.estimatedGrams)} g</span></>}</div>)}</div>

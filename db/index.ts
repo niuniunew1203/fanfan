@@ -41,7 +41,7 @@ const imageStore = {
     return {
       body: value.stream(),
       httpEtag: `\"${key.replace(/[^a-zA-Z0-9]/g, "")}\"`,
-      httpMetadata: { contentType, cacheControl: "private, max-age=3600" },
+      httpMetadata: { contentType, cacheControl: "private, max-age=604800, immutable" },
       writeHttpMetadata(headers: Headers) { headers.set("content-type", contentType); },
       arrayBuffer: () => value.arrayBuffer(),
     };
@@ -133,6 +133,13 @@ export async function ensureDatabase() {
 
 async function initializeDatabase() {
   const db = getD1();
+  const existing = await db.prepare(`SELECT (
+    to_regclass('public.users') IS NOT NULL AND
+    to_regclass('public.user_identities') IS NOT NULL AND
+    to_regclass('public.meals') IS NOT NULL AND
+    to_regclass('public.meal_analyses') IS NOT NULL
+  ) AS ready`).first<{ ready: boolean }>();
+  if (existing?.ready) return;
   const statements = [
     `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, auth_provider TEXT NOT NULL, auth_subject TEXT NOT NULL, display_name TEXT NOT NULL, avatar_url TEXT NOT NULL, avatar_key TEXT, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text), UNIQUE(auth_provider, auth_subject))`,
     `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text))`,
